@@ -1,0 +1,26 @@
+wi29.tsp
+best = 27603 (programação exata)
+my = 28145.16 (DLK)
+gap = 1,96%
+
+dj38.tsp
+best = 6656 (programação exata)
+my = 7420.61 (DLK)
+gap = 22,40% (preso em ótimo local)
+
+qa194.tsp
+best = 9352
+my = 10278.8
+gap = 9,91%
+
+
+uy734.tsp
+best = 79.114
+my = 90995.02
+gap = 15,01%
+
+
+lu980.tsp
+best = 11340 (programação linear)
+my = 13021.36
+gap = 14,82%
