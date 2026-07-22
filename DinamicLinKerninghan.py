@@ -772,7 +772,7 @@ def solve_tsp_combined(
 
 def solve_single_tsp(
     filepath: str,
-    max_cluster_size: int = 64,
+    max_cluster_size: int = 250,
     use_kmeans: bool = True,
     verbose: bool = False,
 ) -> Tuple[List[int], float, Dict]:
@@ -847,7 +847,7 @@ def solve_single_tsp(
 
 def solve_multi_instance_tsp(
     instances_dir: str = "instances",
-    max_cluster_size: int = 64,
+    max_cluster_size: int = 250,
     use_kmeans: bool = True,
     verbose: bool = False,
 ) -> Tuple[List[Tuple[int, int]], float, Dict]:

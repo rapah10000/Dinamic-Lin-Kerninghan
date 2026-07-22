@@ -71,7 +71,7 @@ def solve_tsp_lin_kernighan(
     joint_indices=None,
     joint_window=3,
     max_no_improve=50,
-    max_perturbations=100,
+    max_perturbations=30,
     verbose=False,
     log_file=None,
 ):
@@ -178,7 +178,7 @@ def solve_tsp_lin_kernighan(
 
         t1 = tour[t1_idx]
         if t1 in fixed_set:
-            return False, None
+            return False
 
         i = t1_idx
         t1_next = tour[(i + 1) % n]
@@ -218,189 +218,6 @@ def solve_tsp_lin_kernighan(
 
         return False, None
 
-
-    def try_or_opt_from(t1_idx, block_size=1):
-        """
-        Or-opt(1): remove um único nó e tenta reinseri-lo após um candidato.
-
-        Retorna:
-            (True, touched_nodes) se encontrou melhoria;
-            (False, None) caso contrário.
-        """
-        nonlocal current_cost
-
-        if block_size != 1:
-            raise NotImplementedError("Somente Or-opt(1) implementado.")
-
-        a_idx = t1_idx
-        a = tour[a_idx]
-
-        if a in fixed_set:
-            return False, None
-
-        prev_idx = (a_idx - 1) % n
-        next_idx = (a_idx + 1) % n
-
-        prev_node = tour[prev_idx]
-        next_node = tour[next_idx]
-
-        # Nunca remover nó protegido
-        if (
-            prev_node in fixed_set
-            or next_node in fixed_set
-        ):
-            return False, None
-
-        for target in candidates[a]:
-
-            insert_idx = position[target]
-
-            # Não inserir ao lado da posição original
-            if (
-                insert_idx == a_idx
-                or insert_idx == prev_idx
-                or insert_idx == next_idx
-            ):
-                continue
-
-            after_idx = (insert_idx + 1) % n
-            after_node = tour[after_idx]
-
-            # Evita criar laços triviais
-            if after_node == a:
-                continue
-
-            # Ganho do movimento
-            delta = (
-                - dist[prev_node][a]
-                - dist[a][next_node]
-                - dist[target][after_node]
-                + dist[prev_node][next_node]
-                + dist[target][a]
-                + dist[a][after_node]
-            )
-
-            if delta >= -1e-9:
-                continue
-
-            # -----------------------------
-            # Executa o movimento
-            # -----------------------------
-            node = tour.pop(a_idx)
-
-            if insert_idx > a_idx:
-                insert_idx -= 1
-
-            tour.insert(insert_idx + 1, node)
-
-            # Atualiza posições
-            for idx, node in enumerate(tour):
-                position[node] = idx
-
-            current_cost += delta
-
-            return True, {
-                prev_node,
-                a,
-                next_node,
-                target,
-                after_node,
-            }
-
-        return False, None
-        
-    def try_or_opt2_from(a_idx):
-        """
-        Or-opt(1): remove um único nó e tenta reinseri-lo após um candidato.
-
-        Retorna:
-            (True, touched_nodes) se encontrou melhoria;
-            (False, None) caso contrário.
-        """
-        nonlocal current_cost
-
-        if a_idx >= n - 1:
-            return False, None
-        a = tour[a_idx]
-        b = tour[a_idx + 1]
-
-        if a in fixed_set:
-            return False, None
-
-        prev_idx = (a_idx - 1) % n
-        next_idx = (a_idx + 2) % n
-
-        prev_node = tour[prev_idx]
-        next_node = tour[next_idx]
-
-        # Nunca remover nó protegido
-        if (
-            prev_node in fixed_set
-            or next_node in fixed_set
-        ):
-            return False, None
-
-        for target in candidates[a]:
-
-            insert_idx = position[target]
-
-            # Não inserir ao lado da posição original
-            if (
-                insert_idx >= a_idx + 1
-                and insert_idx <= a_idx + 1
-            ):
-                continue
-
-            after_idx = (insert_idx + 1) % n
-            after_node = tour[after_idx]
-
-            # Evita criar laços triviais
-            if after_node in (a,b):
-                continue
-
-            # Ganho do movimento
-            delta = (
-                - dist[prev_node][a]
-                - dist[b][next_node]
-                - dist[target][after_node]
-            
-                + dist[prev_node][next_node]
-                + dist[target][a]
-                + dist[b][after_node]
-            )
-
-            if delta >= -1e-9:
-                continue
-
-            # -----------------------------
-            # Executa o movimento
-            # -----------------------------
-            block = tour[a_idx:a_idx + 2]
-            del tour[a_idx:a_idx + 2]
-
-            if insert_idx > a_idx:
-                insert_idx -= 2
-
-            tour[insert_idx + 1:insert_idx + 1] = block
-
-            # Atualiza posições
-            for idx, node in enumerate(tour):
-                position[node] = idx
-
-            current_cost += delta
-
-            return True, {
-                prev_node,
-                a,
-                b,
-                next_node,
-                target,
-                after_node,
-            }
-
-        return False, None
-
-
     def local_search():
         """Roda 2-opt até convergir para um ótimo local, respeitando fixed_nodes."""
         nonlocal current_cost
@@ -423,16 +240,6 @@ def solve_tsp_lin_kernighan(
 
                 result, touched_nodes = try_improve_from(position[t1])
 
-                if not result:
-                    result, touched_nodes = try_or_opt_from(
-                        position[t1],
-                        block_size=1
-                    )
-                if not result:
-                    result, touched_nodes = try_or_opt2_from(
-                        position[t1]
-                    )
-
                 if result:
                     improved_any = True
                     for node in touched_nodes:
@@ -447,56 +254,11 @@ def solve_tsp_lin_kernighan(
             if not improved_any:
                 break
 
-    def bidirectional_local_search():
-        """
-        Executa a busca local (2-opt) no tour original e no tour invertido,
-        retornando a melhor solução encontrada.
-        """
-        nonlocal tour, current_cost
-
-        # ---------- Sentido normal ----------
-        local_search()
-
-        forward_tour = tour[:]
-        forward_cost = current_cost
-
-        # ---------- Sentido invertido ----------
-        # Mantém a mesma cidade inicial para facilitar comparação
-        reverse_tour = [forward_tour[0], *reversed(forward_tour[1:])]
-
-        tour[:] = reverse_tour
-
-        for idx, node in enumerate(tour):
-            position[node] = idx
-
-        current_cost = compute_tour_cost(tour, dist)
-
-        local_search()
-
-        reverse_cost = current_cost
-
-        if reverse_cost < forward_cost:
-            return tour[:], reverse_cost
-
-        # Restaura o estado original
-        tour[:] = forward_tour
-
-        for idx, node in enumerate(tour):
-            position[node] = idx
-
-        current_cost = forward_cost
-
-        return forward_tour, forward_cost
-
     # Fase 1: busca local até o ótimo (2-opt puro, respeitando fixed_nodes)
-    best_tour, best_cost = bidirectional_local_search()
+    local_search()
 
-    tour[:] = best_tour
-
-    for idx, node in enumerate(tour):
-        position[node] = idx
-
-    current_cost = best_cost
+    best_tour = tour[:]
+    best_cost = current_cost
 
     # Fase 2: Iterated Local Search com double bridge.
     #
@@ -525,20 +287,11 @@ def solve_tsp_lin_kernighan(
             candidate_tour = double_bridge(best_tour, allowed_positions=allowed_positions)
 
             tour[:] = candidate_tour
-
             for idx, node in enumerate(tour):
                 position[node] = idx
-
             current_cost = compute_tour_cost(tour, dist)
 
-            candidate_best_tour, candidate_best_cost = bidirectional_local_search()
-
-            tour[:] = candidate_best_tour
-
-            for idx, node in enumerate(tour):
-                position[node] = idx
-
-            current_cost = candidate_best_cost
+            local_search()
 
             if current_cost < best_cost - 1e-9:
                 best_cost = current_cost
