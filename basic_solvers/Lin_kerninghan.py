@@ -1,205 +1,166 @@
-import numpy as np
-from typing import List, Optional, TextIO, Tuple
-from Bruteforce import solve_tsp_brute_force
-from initial_solution import setup_initial_solution
-
-def _cycle_to_successors(cycle: List[int]) -> List[int]:
-    successors = cycle[:]
-    n = len(cycle)
-    for i, _ in enumerate(cycle):
-        successors[cycle[i]] = cycle[(i + 1) % n]
-    return successors
+import random
+import time
 
 
-def _successors_to_cycle(successors: List[int]) -> List[int]:
-    cycle = successors[:]
-    j = 0
-    for i, _ in enumerate(successors):
-        cycle[i] = j
-        j = successors[j]
-    return cycle
+def compute_tour_cost(tour, dist):
+    cost = 0
+    n = len(tour)
+    for i in range(n):
+        cost += dist[tour[i]][tour[(i + 1) % n]]
+    return cost
 
 
-def _minimizes_hamiltonian_path_distance(
-    tabu: np.ndarray,
-    iteration: int,
-    successors: List[int],
-    ejected_edge: Tuple[int, int],
-    distance_matrix: np.ndarray,
-    hamiltonian_path_distance: float,
-    hamiltonian_cycle_distance: float,
-) -> Tuple[int, int, float]:
-    a, b = ejected_edge
-    best_c = c = last_c = successors[b]
-    path_cb_distance = distance_matrix[c, b]
-    path_bc_distance = distance_matrix[b, c]
-    hamiltonian_path_distance_found = hamiltonian_cycle_distance
+def build_candidate_sets(distance_matrix, k=15):
+    n = len(distance_matrix)
+    candidates = []
 
-    while successors[c] != a:
-        d = successors[c]
-        path_cb_distance += distance_matrix[c, last_c]
-        path_bc_distance += distance_matrix[last_c, c]
-        new_hamiltonian_path_distance_found = (
-            hamiltonian_path_distance
-            + distance_matrix[b, d]
-            - distance_matrix[c, d]
-            + path_cb_distance
-            - path_bc_distance
-        )
+    for i in range(n):
+        nearest = sorted(range(n), key=lambda j: distance_matrix[i][j])
+        nearest.remove(i)
+        candidates.append(nearest[:k])
 
-        if (
-            new_hamiltonian_path_distance_found + distance_matrix[a, c]
-            < hamiltonian_cycle_distance
-        ):
-            return c, d, new_hamiltonian_path_distance_found
-
-        if (
-            tabu[c, d] != iteration
-            and new_hamiltonian_path_distance_found
-            < hamiltonian_path_distance_found
-        ):
-            hamiltonian_path_distance_found = (
-                new_hamiltonian_path_distance_found
-            )
-            best_c = c
-
-        last_c = c
-        c = d
-
-    return best_c, successors[best_c], hamiltonian_path_distance_found
+    return candidates
 
 
-def _print_message(
-    msg: str, verbose: bool, log_file_handler: Optional[TextIO]
-) -> None:
-    if log_file_handler:
-        print(msg, file=log_file_handler)
-
-    if verbose:
-        print(msg)
+def two_opt_swap(tour, i, k):
+    return tour[:i] + tour[i:k+1][::-1] + tour[k+1:]
 
 
-def _solve_tsp_brute_force(
-    distance_matrix: np.ndarray,
-    log_file: Optional[str] = None,
-    verbose: bool = False,
-) -> Tuple[List[int], float]:
-    x, fx = solve_tsp_brute_force(distance_matrix)
-    x = x or []
-
-    log_file_handler = (
-        open(log_file, "w", encoding="utf-8") if log_file else None
-    )
-    msg = (
-        "Few nodes to use Lin-Kernighan heuristics, "
-        "using Brute Force instead. "
-    )
-    if not x:
-        msg += "No solution found."
-    else:
-        msg += f"Found value: {fx}"
-    _print_message(msg, verbose, log_file_handler)
-
-    if log_file_handler:
-        log_file_handler.close()
-
-    return x, fx
+def double_bridge(tour):
+    n = len(tour)
+    a, b, c, d = sorted(random.sample(range(n), 4))
+    return tour[:a] + tour[c:d] + tour[b:c] + tour[a:b] + tour[d:]
 
 
 def solve_tsp_lin_kernighan(
-    distance_matrix: np.ndarray,
-    x0: Optional[List[int]] = None,
-    log_file: Optional[str] = None,
-    verbose: bool = False,
-) -> Tuple[List[int], float]:
-    num_vertices = distance_matrix.shape[0]
-    if num_vertices < 4:
-        return _solve_tsp_brute_force(distance_matrix, log_file, verbose)
+    distance_matrix,
+    x0=None,
+    candidates=None,
+    fixed_nodes=None,
+    node_to_cluster=None,
+    max_no_improve=50,
+    verbose=False
+):
+    import random
 
-    hamiltonian_cycle, hamiltonian_cycle_distance = setup_initial_solution(
-        distance_matrix=distance_matrix, x0=x0
-    )
-    vertices = list(range(num_vertices))
-    iteration = 0
-    improvement = True
-    tabu = np.zeros(shape=(num_vertices, num_vertices), dtype=int)
+    n = len(distance_matrix)
 
-    log_file_handler = (
-        open(log_file, "w", encoding="utf-8") if log_file else None
-    )
+    # Initial solution
+    if x0 is None:
+        tour = list(range(n))
+        random.shuffle(tour)
+    else:
+        tour = x0[:]
 
-    while improvement:
-        iteration += 1
-        improvement = False
-        successors = _cycle_to_successors(hamiltonian_cycle)
+    def compute_cost(tour):
+        return sum(distance_matrix[tour[i]][tour[(i+1) % n]] for i in range(n))
 
-        # Eject edge [a, b] to start the chain and compute the Hamiltonian
-        # path distance obtained by ejecting edge [a, b] from the cycle
-        # as reference.
-        a = int(distance_matrix[vertices, successors].argmax())
-        b = successors[a]
-        hamiltonian_path_distance = (
-            hamiltonian_cycle_distance - distance_matrix[a, b]
-        )
+    # Candidate sets
+    if candidates is None:
+        k = min(15, n-1)
+        candidates = []
+        for i in range(n):
+            nearest = sorted(range(n), key=lambda j: distance_matrix[i][j])
+            nearest.remove(i)
+            candidates.append(nearest[:k])
 
-        while True:
-            ejected_edge = a, b
+    # Position array (🔥 performance)
+    position = [0] * n
+    for i in range(n):
+        position[tour[i]] = i
 
-            # Find the edge [c, d] that minimizes the Hamiltonian path obtained
-            # by removing edge [c, d] and adding edge [b, d], with [c, d] not
-            # removed in the current ejection chain.
-            (
-                c,
-                d,
-                hamiltonian_path_distance_found,
-            ) = _minimizes_hamiltonian_path_distance(
-                tabu,
-                iteration,
-                successors,
-                ejected_edge,
-                distance_matrix,
-                hamiltonian_path_distance,
-                hamiltonian_cycle_distance,
-            )
+    best_tour = tour[:]
+    best_cost = compute_cost(tour)
 
-            # If the Hamiltonian cycle cannot be improved, return
-            # to the solution and try another ejection.
-            if hamiltonian_path_distance_found >= hamiltonian_cycle_distance:
+    dont_look = [False] * n
+    no_improve_count = 0
+
+    while no_improve_count < max_no_improve:
+        improvement_found = False
+
+        for t1_idx in range(n):
+            if dont_look[t1_idx]:
+                continue
+
+            t1 = tour[t1_idx]
+
+            neighbors = candidates[t1] if candidates else range(n)
+
+            for t2 in neighbors:
+                if t2 == t1:
+                    continue
+
+                t2_idx = position[t2]
+                i, j = sorted([t1_idx, t2_idx])
+
+                # 🔥 PROTEÇÃO COMPLETA DE CLUSTERS
+                if node_to_cluster:
+                    segment = tour[i:j+1]
+                    clusters_in_segment = {node_to_cluster[node] for node in segment}
+
+                    # evita mexer dentro de um único cluster
+                    if len(clusters_in_segment) == 1:
+                        continue
+
+                # 2-opt
+                new_tour = tour[:i] + tour[i:j+1][::-1] + tour[j+1:]
+                new_cost = compute_cost(new_tour)
+
+                if new_cost < best_cost:
+                    tour = new_tour
+                    best_tour = new_tour[:]
+                    best_cost = new_cost
+
+                    # 🔥 atualizar posição SEMPRE
+                    for k in range(n):
+                        position[tour[k]] = k
+
+                    dont_look[t1_idx] = False
+                    improvement_found = True
+                    break
+
+            # 🔥 fallback (exploração completa)
+            if not improvement_found:
+                for t2 in range(n):
+                    if t2 == t1:
+                        continue
+
+                    t2_idx = position[t2]
+                    i, j = sorted([t1_idx, t2_idx])
+
+                    if node_to_cluster:
+                        segment = tour[i:j+1]
+                        clusters_in_segment = {node_to_cluster[node] for node in segment}
+
+                        if len(clusters_in_segment) == 1:
+                            continue
+
+                    new_tour = tour[:i] + tour[i:j+1][::-1] + tour[j+1:]
+                    new_cost = compute_cost(new_tour)
+
+                    if new_cost < best_cost:
+                        tour = new_tour
+                        best_tour = new_tour[:]
+                        best_cost = new_cost
+
+                        for k in range(n):
+                            position[tour[k]] = k
+
+                        dont_look[t1_idx] = False
+                        improvement_found = True
+                        break
+
+            if not improvement_found:
+                dont_look[t1_idx] = True
+            else:
                 break
 
-            # Update Hamiltonian path distance reference
-            hamiltonian_path_distance = hamiltonian_path_distance_found
+        if improvement_found:
+            no_improve_count = 0
+        else:
+            no_improve_count += 1
 
-            # Reverse the direction of the path from b to c
-            i, si, successors[b] = b, successors[b], d
-            while i != c:
-                successors[si], i, si = i, si, successors[si]
+    if verbose:
+        print(f"[LK FINAL] Cost: {best_cost:.2f}")
 
-            # Don't remove again the minimal edge found
-            tabu[c, d] = tabu[d, c] = iteration
-
-            # c plays the role of b in the next iteration
-            b = c
-
-            msg = (
-                f"Current value: {hamiltonian_cycle_distance}; "
-                f"Ejection chain: {iteration}"
-            )
-            _print_message(msg, verbose, log_file_handler)
-
-            # If the Hamiltonian cycle improves, update the solution
-            if (
-                hamiltonian_path_distance + distance_matrix[a, b]
-                < hamiltonian_cycle_distance
-            ):
-                improvement = True
-                successors[a] = b
-                hamiltonian_cycle = _successors_to_cycle(successors)
-                hamiltonian_cycle_distance = (
-                    hamiltonian_path_distance + distance_matrix[a, b]
-                )
-
-    if log_file_handler:
-        log_file_handler.close()
-
-    return hamiltonian_cycle, hamiltonian_cycle_distance
+    return best_tour, best_cost

@@ -14,8 +14,7 @@ start = 0
 visited = []
 
 problem = tsplib95.load('wi29.tsp')
-
-print(problem.render())
+# print(problem.render())  # disabled
 
 
 def solve_tsp_dynamic_programming(
@@ -511,21 +510,25 @@ def solve_tsp_combined(
     programming solver, then connects clusters using a contracted-graph
     Lin-Kernighan run and refines the final tour with Lin-Kernighan.
     """
+    VERBOSE = False
     start_time = time.time()
     num_vertices = distance_matrix.shape[0]
     vertices = list(range(num_vertices))
 
-    print(f"[combined] start: n={num_vertices}, max_cluster_size={max_cluster_size}")
+    if VERBOSE:
+        print(f"[combined] start: n={num_vertices}, max_cluster_size={max_cluster_size}")
 
     # Small instance: use exact DP
     if num_vertices <= max_cluster_size:
         t0 = time.time()
         cycle, dist = solve_tsp_dynamic_programming(distance_matrix)
         t1 = time.time()
-        print(f"[combined] small instance solved by DP in {t1 - t0:.3f}s")
+        if VERBOSE:
+            print(f"[combined] small instance solved by DP in {t1 - t0:.3f}s")
         # all nodes are effectively fixed in a small optimal solution
         fixed_nodes = list(range(num_vertices))
-        print(f"[combined] finished total in {time.time() - start_time:.3f}s")
+        if VERBOSE:
+            print(f"[combined] finished total in {time.time() - start_time:.3f}s")
         return cycle, dist, fixed_nodes
 
 

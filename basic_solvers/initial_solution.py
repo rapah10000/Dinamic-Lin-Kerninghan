@@ -1,7 +1,7 @@
 import numpy as np
 from typing import List, Optional, Tuple
 from random import sample
-from permutation_distance import compute_permutation_distance
+from basic_solvers.permutation_distance import compute_permutation_distance
 
 def setup_initial_solution(
     distance_matrix: np.ndarray, x0: Optional[List] = None
