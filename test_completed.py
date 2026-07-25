@@ -28,12 +28,12 @@ OPTIMAL = {
 # ============================================================
 
 INSTANCES = [
-    #"burma14.tsp",
-    #"wi29.tsp",
-    #"dj38.tsp",
+    "burma14.tsp",
+    "wi29.tsp",
+    "dj38.tsp",
     "qa194.tsp",
-    #"uy734.tsp",
-    #"lu980.tsp",
+    "uy734.tsp",
+    "lu980.tsp",
 ]
 
 

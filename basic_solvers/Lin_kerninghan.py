@@ -10,19 +10,12 @@ def compute_tour_cost(tour, dist):
 
 
 def build_candidate_sets(distance_matrix, k=15):
-    """
-    Para cada nó, retorna seus k vizinhos mais próximos, ordenados por
-    distância crescente. A ordenação é essencial: o loop principal usa isso
-    para podar a busca antecipadamente (ver `_improve_from_node`).
-    """
     n = len(distance_matrix)
     candidates = []
-
     for i in range(n):
         nearest = sorted(range(n), key=lambda j: distance_matrix[i][j])
         nearest.remove(i)
         candidates.append(nearest[:k])
-
     return candidates
 
 
@@ -30,35 +23,18 @@ def two_opt_swap(tour, i, k):
     return tour[:i] + tour[i:k + 1][::-1] + tour[k + 1:]
 
 
-def double_bridge(tour, allowed_positions=None):
-    """
-    Perturbação 4-opt clássica usada em Iterated Local Search.
-
-    Parameters
-    ----------
-    tour
-        Tour atual.
-    allowed_positions
-        Se fornecido, os 3 pontos de corte só são sorteados dentre essas
-        posições (em vez de qualquer posição de 1 a n-1). Use isso para
-        restringir a perturbação a regiões específicas do tour — por
-        exemplo, apenas ao redor das junções entre clusters, preservando o
-        interior de segmentos já otimizados (por DP, por exemplo) intactos.
-        Se houver menos de 3 posições válidas disponíveis, a perturbação é
-        pulada (retorna o tour inalterado).
-    """
+def double_bridge(tour, allowed_positions=None, rng=None):
+    r = rng if rng is not None else random
     n = len(tour)
     if n < 8:
         return tour[:]
-
     if allowed_positions is not None:
         candidates = sorted({p for p in allowed_positions if 1 <= p <= n - 1})
         if len(candidates) < 3:
             return tour[:]
-        a, b, c = sorted(random.sample(candidates, 3))
+        a, b, c = sorted(r.sample(candidates, 3))
     else:
-        a, b, c = sorted(random.sample(range(1, n), 3))
-
+        a, b, c = sorted(r.sample(range(1, n), 3))
     return tour[:a] + tour[c:] + tour[b:c] + tour[a:b]
 
 
@@ -72,55 +48,13 @@ def solve_tsp_lin_kernighan(
     joint_window=3,
     max_no_improve=50,
     max_perturbations=100,
+    seed=None,
     verbose=False,
     log_file=None,
 ):
-    """
-    2-opt com listas de candidatos + Iterated Local Search (double bridge),
-    respeitando nós/arestas protegidos (fixed_nodes / node_to_cluster).
-
-    Parameters
-    ----------
-    distance_matrix
-        Matriz de distâncias (n x n).
-    x0
-        Tour inicial (lista de índices). Se None, gera um tour aleatório.
-    candidates
-        Listas de candidatos por nó (ver build_candidate_sets). Se None, são
-        calculadas aqui.
-    fixed_nodes
-        Nós cujas duas arestas já são conhecidas como ótimas (por exemplo,
-        resolvidas exatamente por DP dentro de um cluster). Esses nós nunca
-        iniciam uma troca, e movimentos que romperiam suas arestas são
-        bloqueados.
-    node_to_cluster
-        Mapa nó -> id do cluster. Usado para impedir que uma troca reverta um
-        segmento inteiramente contido em um único cluster (o que seria
-        redundante, já que o DP já resolveu esse cluster de forma ótima).
-    joint_indices
-        Posições no tour inicial (`x0`) onde há uma junção entre clusters.
-        Quando fornecido junto com `fixed_nodes`, habilita uma perturbação
-        double-bridge restrita a essas posições (± `joint_window`), em vez de
-        pular a perturbação inteiramente. Isso permite ao ILS reorganizar
-        como os clusters se conectam sem nunca tocar o interior de um
-        cluster já resolvido de forma ótima pelo DP.
-    joint_window
-        Quantas posições ao redor de cada junção ficam liberadas para os
-        cortes do double-bridge restrito (só tem efeito quando
-        `joint_indices` é fornecido).
-    max_no_improve
-        Número de iterações sem melhoria no loop de busca local (2-opt) antes
-        de considerar convergido.
-    max_perturbations
-        Número de perturbações (double bridge) sem melhoria no ILS antes de
-        parar. Só é usado quando `fixed_nodes` é None — na fase de junção de
-        clusters, perturbar aleatoriamente poderia desfazer partes já ótimas
-        do DP, então preferimos apenas a busca local determinística.
-    verbose
-        Imprime o progresso.
-    """
     n = len(distance_matrix)
     dist = distance_matrix
+    rng = random.Random(seed) if seed is not None else random
 
     if n <= 3:
         tour = x0[:] if x0 is not None else list(range(n))
@@ -128,7 +62,7 @@ def solve_tsp_lin_kernighan(
 
     if x0 is None:
         tour = list(range(n))
-        random.shuffle(tour)
+        rng.shuffle(tour)
     else:
         tour = x0[:]
 
@@ -145,7 +79,6 @@ def solve_tsp_lin_kernighan(
     current_cost = compute_tour_cost(tour, dist)
 
     def reverse_segment(lo, hi):
-        """Reverte tour[lo+1:hi+1] (inclusive) e atualiza o array de posições."""
         i, j = lo + 1, hi
         while i < j:
             tour[i], tour[j] = tour[j], tour[i]
@@ -157,10 +90,8 @@ def solve_tsp_lin_kernighan(
             position[tour[i]] = i
 
     def move_is_protected(t1, t1_next, t2, t2_next, lo, hi):
-        # Nunca tocar arestas incidentes a nós já otimizados pelo DP
         if t1 in fixed_set or t1_next in fixed_set or t2 in fixed_set or t2_next in fixed_set:
             return True
-        # Nunca reverter um segmento inteiramente contido em um único cluster
         if node_to_cluster is not None:
             segment_clusters = {node_to_cluster[node] for node in tour[lo + 1:hi + 1]}
             if len(segment_clusters) <= 1:
@@ -168,67 +99,40 @@ def solve_tsp_lin_kernighan(
         return False
 
     def try_improve_from(t1_idx):
-        """
-        Tenta melhorar quebrando a aresta (t1, sucessor(t1)) por uma troca
-        2-opt com algum candidato de t1. Usa o delta de custo (O(1)) em vez
-        de recomputar o tour inteiro, e poda a busca assim que a distância
-        candidata deixa de compensar (pois `candidates[t1]` está ordenado).
-        """
         nonlocal current_cost
-
         t1 = tour[t1_idx]
         if t1 in fixed_set:
             return False, None
-
         i = t1_idx
         t1_next = tour[(i + 1) % n]
         d_removed_1 = dist[t1][t1_next]
-
         for t2 in candidates[t1]:
             d_new_1 = dist[t1][t2]
-            # Poda: se a nova aresta já é mais longa que a removida, nenhuma
-            # troca subsequente (candidatos mais distantes) pode compensar.
             if d_new_1 >= d_removed_1:
                 break
-
             j = position[t2]
             if j == i or j == (i + 1) % n:
                 continue
-
             t2_next = tour[(j + 1) % n]
             if t2_next == t1:
                 continue
-
             delta = (
                 d_new_1
                 + dist[t1_next][t2_next]
                 - d_removed_1
                 - dist[t2][t2_next]
             )
-
             if delta < -1e-9:
                 lo, hi = (i, j) if i < j else (j, i)
-
                 if move_is_protected(t1, t1_next, t2, t2_next, lo, hi):
                     continue
-
                 reverse_segment(lo, hi)
                 current_cost += delta
                 return True, {t1, t1_next, t2, t2_next}
-
         return False, None
 
-
     def try_or_opt_from(t1_idx, block_size=1):
-        """
-        Or-opt(1): remove um único nó e tenta reinseri-lo após um candidato.
-
-        Retorna:
-            (True, touched_nodes) se encontrou melhoria;
-            (False, None) caso contrário.
-        """
         nonlocal current_cost
-
         if block_size != 1:
             raise NotImplementedError("Somente Or-opt(1) implementado.")
 
@@ -240,11 +144,9 @@ def solve_tsp_lin_kernighan(
 
         prev_idx = (a_idx - 1) % n
         next_idx = (a_idx + 1) % n
-
         prev_node = tour[prev_idx]
         next_node = tour[next_idx]
 
-        # Nunca remover nó protegido
         if (
             prev_node in fixed_set
             or next_node in fixed_set
@@ -252,25 +154,25 @@ def solve_tsp_lin_kernighan(
             return False, None
 
         for target in candidates[a]:
-
             insert_idx = position[target]
-
-            # Não inserir ao lado da posição original
             if (
                 insert_idx == a_idx
                 or insert_idx == prev_idx
                 or insert_idx == next_idx
             ):
                 continue
-
             after_idx = (insert_idx + 1) % n
             after_node = tour[after_idx]
-
-            # Evita criar laços triviais
             if after_node == a:
                 continue
 
-            # Ganho do movimento
+            # BUGFIX: faltava proteger o PONTO DE INSERÇÃO. Sem isso, o nó `a`
+            # podia ser inserido bem no meio de uma aresta já otimizada pelo
+            # DP (target -> after_node), quebrando exatamente a garantia que
+            # fixed_nodes deveria dar.
+            if target in fixed_set or after_node in fixed_set:
+                continue
+
             delta = (
                 - dist[prev_node][a]
                 - dist[a][next_node]
@@ -279,61 +181,34 @@ def solve_tsp_lin_kernighan(
                 + dist[target][a]
                 + dist[a][after_node]
             )
-
             if delta >= -1e-9:
                 continue
 
-            # -----------------------------
-            # Executa o movimento
-            # -----------------------------
             node = tour.pop(a_idx)
-
             if insert_idx > a_idx:
                 insert_idx -= 1
-
             tour.insert(insert_idx + 1, node)
-
-            # Atualiza posições
             for idx, node in enumerate(tour):
                 position[node] = idx
-
             current_cost += delta
-
-            return True, {
-                prev_node,
-                a,
-                next_node,
-                target,
-                after_node,
-            }
-
+            return True, {prev_node, a, next_node, target, after_node}
         return False, None
-        
+
     def try_or_opt2_from(a_idx):
-        """
-        Or-opt(1): remove um único nó e tenta reinseri-lo após um candidato.
-
-        Retorna:
-            (True, touched_nodes) se encontrou melhoria;
-            (False, None) caso contrário.
-        """
         nonlocal current_cost
-
         if a_idx >= n - 1:
             return False, None
         a = tour[a_idx]
         b = tour[a_idx + 1]
-
-        if a in fixed_set:
+        # BUGFIX: faltava checar `b` (o segundo nó do bloco) contra
+        # fixed_set — só `a` era verificado, então um nó fixo podia ser
+        # realocado junto no bloco sem nenhuma proteção.
+        if a in fixed_set or b in fixed_set:
             return False, None
-
         prev_idx = (a_idx - 1) % n
         next_idx = (a_idx + 2) % n
-
         prev_node = tour[prev_idx]
         next_node = tour[next_idx]
-
-        # Nunca remover nó protegido
         if (
             prev_node in fixed_set
             or next_node in fixed_set
@@ -341,98 +216,63 @@ def solve_tsp_lin_kernighan(
             return False, None
 
         for target in candidates[a]:
-
             insert_idx = position[target]
-
-            # Não inserir ao lado da posição original
             if (
                 insert_idx >= a_idx + 1
                 and insert_idx <= a_idx + 1
             ):
                 continue
-
             after_idx = (insert_idx + 1) % n
             after_node = tour[after_idx]
-
-            # Evita criar laços triviais
-            if after_node in (a,b):
+            if after_node in (a, b):
                 continue
 
-            # Ganho do movimento
+            # BUGFIX: mesma falha do Or-opt(1) — o ponto de inserção
+            # (target -> after_node) nunca era checado contra fixed_set.
+            if target in fixed_set or after_node in fixed_set:
+                continue
+
             delta = (
                 - dist[prev_node][a]
                 - dist[b][next_node]
                 - dist[target][after_node]
-            
                 + dist[prev_node][next_node]
                 + dist[target][a]
                 + dist[b][after_node]
             )
-
             if delta >= -1e-9:
                 continue
 
-            # -----------------------------
-            # Executa o movimento
-            # -----------------------------
             block = tour[a_idx:a_idx + 2]
             del tour[a_idx:a_idx + 2]
-
             if insert_idx > a_idx:
                 insert_idx -= 2
-
             tour[insert_idx + 1:insert_idx + 1] = block
-
-            # Atualiza posições
             for idx, node in enumerate(tour):
                 position[node] = idx
-
             current_cost += delta
-
-            return True, {
-                prev_node,
-                a,
-                b,
-                next_node,
-                target,
-                after_node,
-            }
-
+            return True, {prev_node, a, b, next_node, target, after_node}
         return False, None
 
-
     def local_search():
-        """Roda 2-opt até convergir para um ótimo local, respeitando fixed_nodes."""
         nonlocal current_cost
-
         dont_look = [False] * n
         for node in fixed_set:
             dont_look[node] = True
-
         active = [i for i in range(n) if not dont_look[tour[i]]]
         no_improve_streak = 0
-
         while active and no_improve_streak < max_no_improve:
             improved_any = False
             next_active = []
-
             for t1_idx in active:
                 t1 = tour[t1_idx]
                 if dont_look[t1]:
                     continue
-
                 result, touched_nodes = try_improve_from(position[t1])
-
                 if not result:
-                    result, touched_nodes = try_or_opt_from(
-                        position[t1],
-                        block_size=1
-                    )
+                    result, touched_nodes = try_or_opt_from(position[t1], block_size=1)
                 if not result:
-                    result, touched_nodes = try_or_opt2_from(
-                        position[t1]
-                    )
-
+                    result, touched_nodes = try_or_opt2_from(position[t1])
                 if result:
                     improved_any = True
                     for node in touched_nodes:
@@ -440,76 +280,39 @@ def solve_tsp_lin_kernighan(
                     next_active.extend(position[node] for node in touched_nodes)
                 else:
                     dont_look[t1] = True
-
             active = list(set(next_active)) if improved_any else []
             no_improve_streak = 0 if improved_any else no_improve_streak + 1
-
             if not improved_any:
                 break
 
     def bidirectional_local_search():
-        """
-        Executa a busca local (2-opt) no tour original e no tour invertido,
-        retornando a melhor solução encontrada.
-        """
         nonlocal tour, current_cost
-
-        # ---------- Sentido normal ----------
         local_search()
-
         forward_tour = tour[:]
         forward_cost = current_cost
-
-        # ---------- Sentido invertido ----------
-        # Mantém a mesma cidade inicial para facilitar comparação
         reverse_tour = [forward_tour[0], *reversed(forward_tour[1:])]
-
         tour[:] = reverse_tour
-
         for idx, node in enumerate(tour):
             position[node] = idx
-
         current_cost = compute_tour_cost(tour, dist)
-
         local_search()
-
         reverse_cost = current_cost
-
         if reverse_cost < forward_cost:
             return tour[:], reverse_cost
-
-        # Restaura o estado original
         tour[:] = forward_tour
-
         for idx, node in enumerate(tour):
             position[node] = idx
-
         current_cost = forward_cost
-
         return forward_tour, forward_cost
 
-    # Fase 1: busca local até o ótimo (2-opt puro, respeitando fixed_nodes)
     best_tour, best_cost = bidirectional_local_search()
-
     tour[:] = best_tour
-
     for idx, node in enumerate(tour):
         position[node] = idx
-
     current_cost = best_cost
 
-    # Fase 2: Iterated Local Search com double bridge.
-    #
-    # - Sem nós protegidos: perturbação irrestrita (qualquer ponto de corte).
-    # - Com nós protegidos (fixed_nodes) mas sem joint_indices: pula a
-    #   perturbação inteiramente, por segurança (comportamento anterior).
-    # - Com nós protegidos E joint_indices: perturbação restrita às
-    #   vizinhanças das junções entre clusters, permitindo ao ILS explorar
-    #   diferentes formas de conectar os clusters sem nunca desfazer o
-    #   interior de um cluster já resolvido de forma ótima pelo DP.
     allowed_positions = None
     enable_perturbation = False
-
     if not fixed_set:
         enable_perturbation = n >= 8
     elif joint_indices:
@@ -522,30 +325,20 @@ def solve_tsp_lin_kernighan(
     if enable_perturbation:
         no_improve_perturbations = 0
         while no_improve_perturbations < max_perturbations:
-            candidate_tour = double_bridge(best_tour, allowed_positions=allowed_positions)
-
+            candidate_tour = double_bridge(best_tour, allowed_positions=allowed_positions, rng=rng)
             tour[:] = candidate_tour
-
             for idx, node in enumerate(tour):
                 position[node] = idx
-
             current_cost = compute_tour_cost(tour, dist)
-
             candidate_best_tour, candidate_best_cost = bidirectional_local_search()
-
             tour[:] = candidate_best_tour
-
             for idx, node in enumerate(tour):
                 position[node] = idx
-
             current_cost = candidate_best_cost
-
             if current_cost < best_cost - 1e-9:
                 best_cost = current_cost
                 best_tour = tour[:]
                 no_improve_perturbations = 0
-                if verbose:
-                    print(f"[LK ILS] melhoria encontrada: {best_cost:.2f}")
             else:
                 no_improve_perturbations += 1
 

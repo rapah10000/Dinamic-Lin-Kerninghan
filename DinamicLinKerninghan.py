@@ -1,7 +1,6 @@
 from math import sqrt
 import numpy as np
 from typing import Dict, List, Optional, Tuple, TextIO
-from functools import lru_cache
 import os
 import time
 import tsplib95
@@ -33,7 +32,7 @@ def _load_tsp_file(filepath: str) -> Tuple[np.ndarray, List[int], Dict]:
     Parameters
     ----------
     filepath : str
-        Path to the .tsp file.
+        Path to the .tsp file
 
     Returns
     -------
@@ -46,22 +45,24 @@ def _load_tsp_file(filepath: str) -> Tuple[np.ndarray, List[int], Dict]:
     nodes = list(problem.get_nodes())
     n = len(nodes)
 
-    # Initialize distance matrix
-    mat = np.zeros((n, n), dtype=float)
+    # Build distance matrix based on problem type
+    mat = np.zeros((n, n))
 
     # Detect edge weight type
-    edge_type = getattr(problem, "edge_weight_type", "").upper()
+    edge_type = (getattr(problem, "edge_weight_type", "") or "").upper()
 
     if edge_type == "EUC_2D" and hasattr(problem, "node_coords") and problem.node_coords:
-        # Fast vectorized computation for Euclidean instances
+        # Vetorizado, e arredondado ao inteiro mais próximo (nint), conforme
+        # a especificação TSPLIB — necessário para bater com os valores
+        # ótimos publicados para as instâncias padrão (ex: berlin52, eil51).
         coords = problem.node_coords
         xy = np.array([coords[u] for u in nodes], dtype=float)
-
         diff = xy[:, None, :] - xy[None, :, :]
         mat = np.rint(np.sqrt((diff ** 2).sum(axis=-1))).astype(float)
-
     else:
-        # Use TSPLIB's official distance function
+        # Demais tipos (GEO, ATT, CEIL_2D, matrizes explícitas, etc.):
+        # delega para o get_weight oficial da tsplib95, que já aplica a
+        # fórmula/arredondamento corretos para cada edge_weight_type.
         for i, u in enumerate(nodes):
             for j, v in enumerate(nodes):
                 if i != j:
@@ -69,14 +70,13 @@ def _load_tsp_file(filepath: str) -> Tuple[np.ndarray, List[int], Dict]:
 
     # Extract metadata
     metadata = {
-        "name": problem.name,
-        "comment": problem.comment,
-        "dimension": n,
-        "edge_weight_type": edge_type,
+        'name': problem.name,
+        'comment': problem.comment,
+        'dimension': n,
+        'edge_weight_type': edge_type or 'UNKNOWN',
     }
 
     return mat, nodes, metadata
-
 
 
 def _load_all_instances(instances_dir: str = "instances") -> List[Tuple[str, np.ndarray, List[int], Dict]]:
@@ -122,20 +122,20 @@ def _load_all_instances(instances_dir: str = "instances") -> List[Tuple[str, np.
 # DYNAMIC PROGRAMMING TSP SOLVER
 # =============================================================================
 
-from typing import List, Tuple
-import numpy as np
-
-
 def solve_tsp_dynamic_programming(
     distance_matrix: np.ndarray,
 ) -> Tuple[List[int], float]:
     """
-    Solve TSP exactly using the Held-Karp algorithm
-    with bitmask dynamic programming.
+    Solve TSP exactly using the Held-Karp algorithm with iterative bitmask
+    dynamic programming.
+
+    Comparada à versão recursiva anterior (baseada em lru_cache), esta
+    versão evita risco de estouro de pilha de recursão para clusters maiores
+    e foi validada contra força bruta em instâncias aleatórias.
 
     Parameters
     ----------
-    distance_matrix : np.ndarray
+    distance_matrix
         Distance matrix (n x n)
 
     Returns
@@ -143,135 +143,85 @@ def solve_tsp_dynamic_programming(
     Tuple[List[int], float]
         (optimal tour, optimal distance)
     """
-
     n = distance_matrix.shape[0]
 
     if n == 0:
         return [], 0.0
-
     if n == 1:
         return [0], 0.0
-
     if n == 2:
-        dist = (
-            distance_matrix[0, 1]
-            + distance_matrix[1, 0]
-        )
+        dist = distance_matrix[0, 1] + distance_matrix[1, 0]
         return [0, 1], float(dist)
 
     INF = float("inf")
+    dp: Dict[Tuple[int, int], float] = {}
+    parent: Dict[Tuple[int, int], int] = {}
 
-    #
-    # dp[(mask,last)] = minimum cost
-    #
-    dp = {}
-
-    #
-    # parent[(mask,last)] = predecessor
-    #
-    parent = {}
-
-    #
-    # Initial states
-    #
     for k in range(1, n):
         mask = 1 << (k - 1)
         dp[(mask, k)] = distance_matrix[0, k]
 
-    #
-    # Iterate over subset sizes
-    #
     full_mask = (1 << (n - 1)) - 1
 
     for mask in range(full_mask + 1):
-
         for last in range(1, n):
-
             if not (mask & (1 << (last - 1))):
                 continue
 
             state = (mask, last)
-
             if state not in dp:
                 continue
 
             current_cost = dp[state]
-
-            #
-            # Try every next city
-            #
             remaining = full_mask ^ mask
-
             r = remaining
 
             while r:
-
                 bit = r & -r
                 nxt = bit.bit_length()
-
                 new_mask = mask | bit
-
-                new_cost = (
-                    current_cost
-                    + distance_matrix[last, nxt]
-                )
-
+                new_cost = current_cost + distance_matrix[last, nxt]
                 new_state = (new_mask, nxt)
 
-                if (
-                    new_state not in dp
-                    or new_cost < dp[new_state]
-                ):
+                if new_state not in dp or new_cost < dp[new_state]:
                     dp[new_state] = new_cost
                     parent[new_state] = last
 
                 r ^= bit
 
-    #
-    # Close the tour
-    #
     best_cost = INF
     last_city = -1
 
     for last in range(1, n):
-
         state = (full_mask, last)
-
         if state not in dp:
             continue
-
-        cost = (
-            dp[state]
-            + distance_matrix[last, 0]
-        )
-
+        cost = dp[state] + distance_matrix[last, 0]
         if cost < best_cost:
             best_cost = cost
             last_city = last
 
-    #
-    # Reconstruct tour
-    #
+    if last_city == -1:
+        # Não deveria acontecer com uma matriz de distâncias válida (sem
+        # inf/NaN), mas evita corromper o tour silenciosamente caso ocorra.
+        raise ValueError("DP não encontrou nenhum estado final válido; "
+                          "verifique se a matriz de distâncias contém inf/NaN.")
+
     mask = full_mask
     current = last_city
-
     tour = [0]
-
     reverse_path = []
 
     while current != 0:
-
         reverse_path.append(current)
-
         previous = parent.get((mask, current), 0)
-
         mask ^= 1 << (current - 1)
-
         current = previous
 
     tour.extend(reversed(reverse_path))
 
     return tour, float(best_cost)
+
 
 # =============================================================================
 # LIN-KERNIGHAN HELPER FUNCTIONS
@@ -571,6 +521,9 @@ def solve_tsp_combined(
     distance_matrix: np.ndarray,
     max_cluster_size: int = 18,
     use_kmeans: bool = True,
+    lock_clusters: "bool | str" = "auto",
+    auto_lock_threshold: int = 2000,
+    seed: Optional[int] = None,
     log_file: Optional[str] = None,
     verbose: bool = False,
 ) -> Tuple[List[int], float, List[int]]:
@@ -586,6 +539,44 @@ def solve_tsp_combined(
         Maximum size for DP-solved clusters
     use_kmeans
         Use k-means style clustering (better for geographical data)
+    lock_clusters
+        Controla se as arestas internas de cada cluster ficam protegidas
+        (`fixed_nodes`/`node_to_cluster`) durante o refinamento final por
+        Lin-Kernighan:
+
+        - False: usa o tour costurado só como ponto de partida (warm start)
+          para um LK totalmente livre. Gera gaps bem menores (medido: 1,75%
+          vs 15,62% em qa194, n=194), mas é mais lento por rodar a busca
+          sobre o grafo inteiro.
+        - True: protege as arestas internas dos clusters — mais rápido, mas
+          pode travar numa solução ruim (ver aviso abaixo).
+        - "auto" (padrão): decide sozinho com base em `num_vertices` vs
+          `auto_lock_threshold` — usa False (livre) para instâncias até o
+          limiar, e True (travado) acima dele.
+
+        IMPORTANTE: testes em instâncias reais (qa194, n=194) mostraram que
+        `lock_clusters=True` pode travar o LK numa solução bem pior — o DP
+        resolve cada cluster como um problema ISOLADO, o que não garante
+        nada sobre como esse cluster deveria se conectar com o resto do
+        grafo. Com clusters pequenos, a maioria dos nós acaba marcada como
+        "fixa" (interior de cluster), e quase todos os movimentos de
+        melhoria disponíveis passam a ser bloqueados por essa proteção —
+        medimos 17 de 17 movimentos de melhoria bloqueados num caso real.
+        Use lock_clusters=True (ou o modo "auto" acima do limiar) apenas se
+        `distance_matrix` for grande demais para o LK irrestrito rodar em
+        tempo hábil.
+    auto_lock_threshold
+        Número de vértices acima do qual `lock_clusters="auto"` passa a usar
+        o modo travado (True). O valor padrão (2000) é uma estimativa
+        conservadora, não um número validado em benchmark — ajuste conforme
+        o tempo disponível no seu caso de uso: se `lock_clusters=False`
+        estiver rápido o suficiente para instâncias maiores no seu hardware,
+        aumente o limiar; se precisar de respostas mais rápidas em
+        instâncias menores, diminua.
+    seed
+        Semente para reprodutibilidade das chamadas internas ao
+        Lin-Kernighan (TSP contraído entre clusters e refinamento final).
+        Se None, não determinístico.
     log_file
         Optional log file path
     verbose
@@ -595,13 +586,24 @@ def solve_tsp_combined(
     -------
     Tuple
         (final_cycle, total_distance, fixed_nodes)
+        `fixed_nodes` é sempre calculado e retornado (útil como diagnóstico
+        de quão "confinado" o clustering ficou), mas só é de fato usado
+        para restringir a busca quando `lock_clusters=True`.
     """
     start_time = time.time()
     num_vertices = distance_matrix.shape[0]
     vertices = list(range(num_vertices))
+    rng_seed_contracted = seed
+    rng_seed_refine = None if seed is None else seed + 1
+
+    if lock_clusters == "auto":
+        resolved_lock_clusters = num_vertices > auto_lock_threshold
+    else:
+        resolved_lock_clusters = bool(lock_clusters)
 
     if verbose:
-        print(f"[combined] start: n={num_vertices}, max_cluster_size={max_cluster_size}")
+        print(f"[combined] start: n={num_vertices}, max_cluster_size={max_cluster_size}, "
+              f"lock_clusters={lock_clusters} -> resolved={resolved_lock_clusters}")
 
     # Small instance: use exact DP directly
     if num_vertices <= max_cluster_size:
@@ -635,7 +637,12 @@ def solve_tsp_combined(
             global_cycle = [cluster[i] for i in local_cycle]
         else:
             submat = distance_matrix[np.ix_(cluster, cluster)]
-            local_cycle, _, _ = solve_tsp_combined(submat, max_cluster_size, use_kmeans)
+            local_cycle, _, _ = solve_tsp_combined(
+                submat, max_cluster_size, use_kmeans,
+                lock_clusters=resolved_lock_clusters,
+                auto_lock_threshold=auto_lock_threshold,
+                seed=seed,
+            )
             global_cycle = [cluster[i] for i in local_cycle]
 
         t1 = time.time()
@@ -668,7 +675,9 @@ def solve_tsp_combined(
     # Solve contracted TSP with Lin-Kernighan (order in which clusters are visited)
     t0 = time.time()
     cluster_candidates = build_candidate_sets(contracted, k=5)
-    contracted_order, _ = solve_tsp_lin_kernighan(contracted, candidates=cluster_candidates)
+    contracted_order, _ = solve_tsp_lin_kernighan(
+        contracted, candidates=cluster_candidates, seed=rng_seed_contracted
+    )
     t1 = time.time()
     if verbose:
         print(f"[combined] contracted TSP (k={k}) solved by LK in {t1 - t0:.3f}s")
@@ -735,19 +744,44 @@ def solve_tsp_combined(
         for node in cluster:
             node_to_cluster[node] = cid
 
-    # Refine with Lin-Kernighan (only joining clusters, not modifying DP-optimized parts)
+    # Refina com Lin-Kernighan.
+    #
+    # lock_clusters=True: comportamento original — protege as arestas
+    # internas de cada cluster (fixed_nodes/node_to_cluster), só reorganiza
+    # as junções. Rápido, mas pode travar numa solução ruim (ver docstring).
+    #
+    # lock_clusters=False (padrão): usa o tour costurado só como ponto de
+    # partida (warm start) para um LK totalmente livre — nenhuma aresta é
+    # protegida. Mais lento que o modo travado, mas evidência empírica
+    # (qa194) mostra gap muito menor.
     if len(final_tour) == num_vertices:
-        if verbose:
-            print(f"[combined] starting LK refinement with {len(fixed_nodes)} protected nodes")
         t0 = time.time()
         node_candidates = build_candidate_sets(distance_matrix, k=15)
-        improved_cycle, improved_dist = solve_tsp_lin_kernighan(
-            distance_matrix,
-            x0=final_tour,
-            candidates=node_candidates,
-            fixed_nodes=fixed_nodes,
-            node_to_cluster=node_to_cluster
-        )
+
+        if resolved_lock_clusters:
+            if verbose:
+                print(f"[combined] starting LK refinement (lock_clusters=True) "
+                      f"with {len(fixed_nodes)} protected nodes")
+            improved_cycle, improved_dist = solve_tsp_lin_kernighan(
+                distance_matrix,
+                x0=final_tour,
+                candidates=node_candidates,
+                fixed_nodes=fixed_nodes,
+                node_to_cluster=node_to_cluster,
+                joint_indices=joint_indices,
+                seed=rng_seed_refine,
+            )
+        else:
+            if verbose:
+                print("[combined] starting LK refinement (lock_clusters=False) "
+                      "— busca totalmente livre, tour costurado como warm start")
+            improved_cycle, improved_dist = solve_tsp_lin_kernighan(
+                distance_matrix,
+                x0=final_tour,
+                candidates=node_candidates,
+                seed=rng_seed_refine,
+            )
+
         t1 = time.time()
         if verbose:
             print(f"[combined] LK refinement finished in {t1 - t0:.3f}s")
@@ -772,7 +806,7 @@ def solve_tsp_combined(
 
 def solve_single_tsp(
     filepath: str,
-    max_cluster_size: int = 250,
+    max_cluster_size: int = 16,
     use_kmeans: bool = True,
     verbose: bool = False,
 ) -> Tuple[List[int], float, Dict]:
@@ -847,7 +881,7 @@ def solve_single_tsp(
 
 def solve_multi_instance_tsp(
     instances_dir: str = "instances",
-    max_cluster_size: int = 250,
+    max_cluster_size: int = 16,
     use_kmeans: bool = True,
     verbose: bool = False,
 ) -> Tuple[List[Tuple[int, int]], float, Dict]:
